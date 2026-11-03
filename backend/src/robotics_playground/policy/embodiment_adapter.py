@@ -214,3 +214,36 @@ class EmbodimentAdapter:
         result["session_id"] = self._session_id
 
         return result
+
+    def action_chunk_for_environment(
+        self,
+        actions: np.ndarray,
+    ) -> np.ndarray:
+        preset = self._preset
+        if preset is None:
+            raise RuntimeError("Action preset is not configured")
+
+        chunk = np.array(actions, dtype=np.float32, copy=True)
+
+        if chunk.ndim != 2 or chunk.shape[1] != preset.action.dim:
+            raise ValueError(
+                f"Expected action chunk [H, {preset.action.dim}], "
+                f"got {chunk.shape}"
+            )
+
+        horizon = chunk.shape[0]
+
+        if horizon == 0:
+            raise ValueError("Model returned an empty action chunk")
+
+        if horizon > preset.action.max_chunk_horizon:
+            raise ValueError(
+                f"Action horizon {horizon} exceeds preset maximum "
+                f"{preset.action.max_chunk_horizon}"
+            )
+
+        if not np.isfinite(chunk).all():
+            raise ValueError("Action chunk contains non-finite values")
+
+        execute_horizon = min(horizon, preset.action.execute_horizon)
+        return chunk[:execute_horizon].copy()
