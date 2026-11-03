@@ -17,6 +17,9 @@ services:
       - ./config/playground.yaml:/etc/robotics-playground/config.yaml:ro
     environment:
       PLAYGROUND_CONFIG: /etc/robotics-playground/config.yaml
+      RERUN_VIEWER_URL: "http://localhost:8080/rerun"
+      RERUN_GRPC_URL: "http://localhost:9876"
+      RERUN_ASSETS_URL: "http://localhost:8080/rerun/"
 
   isaac-lab:
     image: nvcr.io/nvidia/isaac-lab:2.3.2
@@ -28,11 +31,34 @@ services:
       - label=disable
     entrypoint: ""
     environment:
+      ROS_DISTRO: jazzy
+      ROS_DOMAIN_ID: "0"
+      RMW_IMPLEMENTATION: rmw_fastrtps_cpp
+      PYTHONPATH: /isaac-sim/exts/isaacsim.ros2.bridge/jazzy/rclpy
       LD_LIBRARY_PATH: /isaac-sim/exts/isaacsim.ros2.bridge/jazzy/lib
-    volumes:
-      - ./isaac-sim/launch_ros2_scene.py:/app/launch_ros2_scene.py:ro
-    command: >-
-      bash -c './isaaclab.sh -p /app/launch_ros2_scene.py --headless --enable_cameras'
+#    volumes:
+#      - ./isaac-sim/launch_ros2_scene.py:/app/launch_ros2_scene.py:ro
+#    command: >-
+#      bash -c './isaaclab.sh -p /app/launch_ros2_scene.py --headless --enable_cameras'
+    command:
+      - bash
+      - -lc
+      - |
+        set -e
+
+        git clone --depth 1 --branch main \
+          https://github.com/redhat-et/ros2_manager_based_env.git \
+          /workspace/ros2_manager_based_env
+
+        cd /workspace/isaaclab
+
+        ./isaaclab.sh -p -m pip install -e /workspace/ros2_manager_based_env
+
+        exec ./isaaclab.sh -p -m ros2_manager_based_env.droid_pi05.run_ros2_rollout \
+          --headless \
+          --enable_cameras \
+          --rendering_mode performance
+
     deploy:
       resources:
         reservations:

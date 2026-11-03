@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field
 from collections.abc import AsyncIterator, Callable
-from typing import Protocol, TypedDict
+from typing import NotRequired, Protocol, TypedDict
 
 import numpy as np
 
@@ -27,6 +27,7 @@ class Observation(TypedDict):
     cameras: dict[str, np.ndarray]
     joint_positions: list[float]
     joint_velocities: list[float]
+    state: NotRequired[list[float]]
 
 
 class Action(TypedDict):

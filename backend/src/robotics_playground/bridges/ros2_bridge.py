@@ -38,6 +38,7 @@ class ROS2Bridge:
         self._latest_cameras: dict[str, np.ndarray] = {}
         self._latest_joint_positions: list[float] = []
         self._latest_joint_velocities: list[float] = []
+        self._latest_state: list[float] | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._status = "disconnected"
         self._publisher = None
@@ -183,6 +184,13 @@ class ROS2Bridge:
         self._step_simulation_client = None
         self._get_simulation_state_client = None
         self._sim_state = None
+        self._latest_state = None
+        self._latest_joint_positions = []
+        self._latest_joint_velocities = []
+        self._latest_cameras.clear()
+
+        while not self._obs_queue.empty():
+            self._obs_queue.get_nowait()
         self._execution_status = None
         self._execution_status_time = 0.0
         self._status = "disconnected"
@@ -353,8 +361,25 @@ class ROS2Bridge:
         self._on_joint_state_received(list(msg.position), list(msg.velocity))
 
     def _handle_float_array_state(self, msg):
-        logger.debug("Float array state received: %d values", len(msg.data))
-        self._on_joint_state_received(list(msg.data), [])
+        state = np.asarray(msg.data, dtype=np.float32)
+
+        if state.ndim != 1 or state.size == 0 or not np.isfinite(state).all():
+            logger.warning("Ignoring invalid Float32MultiArray state")
+            return
+
+        expected_dim = self._config.state_dim
+        if expected_dim is not None and state.size != expected_dim:
+            logger.warning(
+                "Ignoring state with dimension %d; expected %d",
+                state.size,
+                expected_dim,
+            )
+            return
+
+        self._latest_state = state.tolist()
+
+        # Compatibility with existing consumers during the migration.
+        self._on_joint_state_received(list(self._latest_state), [])
 
     def _enqueue_observation(self):
         if self._loop is None or not self._latest_joint_positions:
@@ -380,6 +405,8 @@ class ROS2Bridge:
             joint_positions=list(self._latest_joint_positions),
             joint_velocities=list(self._latest_joint_velocities),
         )
+        if self._latest_state is not None:
+            obs["state"] = list(self._latest_state)
         self._step += 1
         if self._step % 100 == 0:
             logger.info("Observation step %d, listeners=%d", self._step, len(self._obs_listeners))
@@ -409,12 +436,18 @@ class ROS2Bridge:
     async def get_latest_observation(self) -> Observation | None:
         if not self._latest_joint_positions or not self._latest_cameras:
             return None
-        return Observation(
+
+        obs = Observation(
             step=self._step,
             cameras=dict(self._latest_cameras),
             joint_positions=list(self._latest_joint_positions),
             joint_velocities=list(self._latest_joint_velocities),
         )
+
+        if self._latest_state is not None:
+            obs["state"] = list(self._latest_state)
+
+        return obs
 
     async def observation_stream(self) -> AsyncIterator[Observation]:
         while True:
