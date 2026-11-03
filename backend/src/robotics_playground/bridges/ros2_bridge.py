@@ -11,11 +11,13 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from robotics_playground.bridges.protocol import Action, Observation
+from robotics_playground.bridges.protocol import Action, ExecutionStatus, Observation, ChunkExecutionInterrupted
 from robotics_playground.config import BridgeConfig
 
 if TYPE_CHECKING:
     from robotics_playground.config import ROS2Config
+
+from pydantic import ValidationError
 
 logger = logging.getLogger(__name__)
 
@@ -56,9 +58,19 @@ class ROS2Bridge:
         self._obs_listeners: list[Callable[[Observation], None]] = []
         self._service_call_queue: queue.Queue = queue.Queue()
 
+        self._execution_status: ExecutionStatus | None = None
+        self._execution_status_time: float = 0.0
+        self._execution_status_changed = asyncio.Event()
+        self._chunk_execution_lock = asyncio.Lock()
+        self._connection_generation = 0
+
     @property
     def bridge_status(self) -> str:
         return self._status
+
+    @property
+    def execution_status(self) -> ExecutionStatus | None:
+        return self._execution_status
 
     @property
     def sim_state(self) -> str:
@@ -79,7 +91,7 @@ class ROS2Bridge:
             SetSimulationState,
             StepSimulation,
         )
-        from std_msgs.msg import Float32MultiArray
+        from std_msgs.msg import Float32MultiArray, String
 
         sensor_qos = QoSProfile(
             depth=1,
@@ -127,6 +139,13 @@ class ROS2Bridge:
                 10,
             )
 
+        if self._config.status_topic:
+            self._node.create_subscription(
+                String,
+                self._config.status_topic,
+                self._handle_execution_status,
+                1,
+            )
         # Standard simulation_interfaces service clients
         self._reset_simulation_client = self._node.create_client(
             ResetSimulation, "/reset_simulation"
@@ -147,6 +166,7 @@ class ROS2Bridge:
         logger.info("ROS 2 node created, status=connecting")
 
     def _teardown_node(self) -> None:
+        self._connection_generation += 1
         if self._executor is not None:
             self._executor.shutdown()
             self._executor = None
@@ -163,6 +183,8 @@ class ROS2Bridge:
         self._step_simulation_client = None
         self._get_simulation_state_client = None
         self._sim_state = None
+        self._execution_status = None
+        self._execution_status_time = 0.0
         self._status = "disconnected"
         logger.info("ROS 2 node torn down, status=disconnected")
 
@@ -302,6 +324,25 @@ class ROS2Bridge:
             # DDS callbacks arrive continuously (realtime sim mode).
             time.sleep(0.01)
 
+    def _handle_execution_status(self, msg):
+        try:
+            status = ExecutionStatus.model_validate_json(msg.data)
+        except ValidationError as exc:
+            logger.warning("Invalid execution status: %s", exc)
+            return
+
+        if self._loop is not None:
+            self._loop.call_soon_threadsafe(
+                self._apply_execution_status,
+                status,
+                time.monotonic(),
+            )
+
+    def _apply_execution_status(self, status: ExecutionStatus, received_at: float):
+        self._execution_status = status
+        self._execution_status_time = received_at
+        self._execution_status_changed.set()
+
     def _handle_image(self, camera_name: str, msg):
         logger.debug("Image received: %s (%dx%d)", camera_name, msg.width, msg.height)
         data = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width, -1)
@@ -400,6 +441,120 @@ class ROS2Bridge:
             msg = Float32MultiArray()
             msg.data = [float(v) for v in action["joint_positions"]]
             self._float_array_publisher.publish(msg)
+
+    async def send_action_chunk(self, chunk: np.ndarray) -> None:
+        """Publish a complete chunk; the environment controls execution timing."""
+        if self._node is None or self._float_array_publisher is None:
+            raise RuntimeError("Chunk transport requires a connected Float32MultiArray publisher")
+
+        action_dim = self._config.action_dim
+        if action_dim is None:
+            raise ValueError("ros2.action_dim must be configured for chunk transport")
+
+        values = np.array(chunk, dtype=np.float32, copy=True)
+
+        if values.ndim != 2 or values.shape[1] != action_dim:
+            raise ValueError(f"Expected action chunk [H,{action_dim}], got {values.shape}")
+
+        if not np.isfinite(values).all():
+            raise ValueError("Action chunk must contain only finite values")
+
+        horizon = values.shape[0]
+        max_horizon = self._config.max_chunk_horizon
+
+        if max_horizon is not None and horizon > max_horizon:
+            raise ValueError(f"Chunk horizon {horizon} exceeds configured maximum {max_horizon}")
+
+        if self._float_array_publisher.get_subscription_count() == 0:
+            raise RuntimeError("No environment subscriber on the action topic")
+
+        from std_msgs.msg import Float32MultiArray, MultiArrayDimension
+
+        msg = Float32MultiArray()
+        msg.layout.data_offset = 0
+
+        if horizon > 0:
+            msg.layout.dim = [
+                MultiArrayDimension(label="horizon", size=horizon, stride=horizon * action_dim,),
+                MultiArrayDimension(label="action",  size=action_dim, stride=action_dim,),
+            ]
+
+        msg.data = values.reshape(-1).tolist()
+        self._float_array_publisher.publish(msg)
+
+    async def execute_action_chunk(self, chunk: np.ndarray, timeout: float = 30.0,) -> None:
+        """Send one chunk and wait for acceptance and completion."""
+        if not 0 < timeout < float("inf"):
+            raise ValueError("timeout must be positive and finite")
+
+        async with self._chunk_execution_lock:
+            status = self.execution_status
+
+            if status is None:
+                raise RuntimeError("No execution status received from environment")
+
+            if time.monotonic() - self._execution_status_time > self._watchdog_timeout:
+                raise RuntimeError("Environment execution status is stale")
+
+            if status.paused:
+                raise ChunkExecutionInterrupted("Environment is paused")
+
+            if not status.idle or status.remaining != 0:
+                raise RuntimeError("Environment still has an unfinished chunk")
+
+            previous_count = status.received_chunks
+            previous_sim_time = status.sim_time
+            generation = self._connection_generation
+            sent_at = time.monotonic()
+
+            await self.send_action_chunk(chunk)
+
+            deadline = time.monotonic() + timeout
+
+            while True:
+                self._execution_status_changed.clear()
+
+                if generation != self._connection_generation:
+                    raise ChunkExecutionInterrupted("ROS connection changed during execution")
+
+                status = self.execution_status
+                now = time.monotonic()
+
+                if status is None:
+                    raise ChunkExecutionInterrupted("Environment execution status was cleared")
+
+                if now - self._execution_status_time > self._watchdog_timeout:
+                    raise TimeoutError("Environment stopped publishing execution status")
+
+                if self._execution_status_time > sent_at:
+                    if status.paused:
+                        raise ChunkExecutionInterrupted("Environment paused or stopped during execution")
+
+                    if status.sim_time < previous_sim_time:
+                        raise ChunkExecutionInterrupted("Environment simulation time was reset")
+
+                    if status.received_chunks < previous_count:
+                        raise ChunkExecutionInterrupted("Environment chunk counter was reset")
+
+                    if status.received_chunks > previous_count + 1:
+                        raise ChunkExecutionInterrupted("Another action message replaced the submitted chunk")
+
+                    accepted = status.received_chunks == previous_count + 1
+
+                    if accepted and status.remaining == 0 and status.idle:
+                        return
+
+                remaining = deadline - now
+                if remaining <= 0:
+                    raise TimeoutError("Timed out waiting for chunk acceptance/completion")
+
+                try:
+                    await asyncio.wait_for(
+                        self._execution_status_changed.wait(),
+                        timeout=min(remaining, 0.5),
+                    )
+                except TimeoutError:
+                    pass
 
     async def _call_service_async(self, client, request_factory, timeout: float = 5.0):
         """Thread-safe service call that bridges ROS2 to asyncio.

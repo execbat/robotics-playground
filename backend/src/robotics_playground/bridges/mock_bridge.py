@@ -7,8 +7,7 @@ from collections.abc import AsyncIterator, Callable
 
 import numpy as np
 
-from robotics_playground.bridges.protocol import Action, Observation
-
+from robotics_playground.bridges.protocol import Action, Observation, ExecutionStatus
 
 class MockBridge:
     def __init__(self) -> None:
@@ -23,6 +22,13 @@ class MockBridge:
     @property
     def bridge_status(self) -> str:
         return self._status
+
+    @property
+    def execution_status(self) -> ExecutionStatus | None:
+        return None
+
+    async def execute_action_chunk(self, chunk: np.ndarray, timeout: float = 30.0,) -> None:
+        raise NotImplementedError("MockBridge chunk execution is not implemented yet")
 
     async def start(self) -> None:
         self._status = "connected"
@@ -65,6 +71,9 @@ class MockBridge:
 
     async def send_action(self, action: Action) -> None:
         self.actions_sent.append(action)
+
+    async def send_action_chunk(self, chunk: np.ndarray) -> None:
+        raise NotImplementedError("MockBridge chunk execution is not implemented yet")
 
     async def sim_control(self, action: str, speed: float | None = None) -> None:
         self.sim_control_calls.append((action, speed))

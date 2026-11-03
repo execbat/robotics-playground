@@ -34,6 +34,10 @@ class ROS2Config(BaseModel):
     state_msg_type: str = "JointState"
     physics_decimation: int = 10
     default_joint_positions: list[float] = []
+    status_topic: str | None = None
+    state_dim: int | None = Field(default=None, gt=0)
+    action_dim: int | None = Field(default=None, gt=0)
+    max_chunk_horizon: int | None = Field(default=None, gt=0)
 
 
 class EmbodimentConfig(BaseModel):
