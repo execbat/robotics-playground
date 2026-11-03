@@ -1,0 +1,60 @@
+id: pi05_frankaPanda_lerobotLibero
+
+checkpoint: execbat/pi05-robot-finetuned
+
+environment:
+  id: custom_env_3_3
+  module: ros2_manager_based_env.custom_env_3_3.run_ros2_rollout
+  physics_hz: 150
+  control_hz: 10
+  physics_decimation: 15
+
+ros2:
+  cameras:
+    wrist: /vla/obs/wrist_cam
+    table: /vla/obs/table_cam
+  state_topic: /vla/obs/state
+  state_msg_type: Float32MultiArray
+  action_topic: /vla/action
+  status_topic: /vla/status
+
+observation:
+  state_dim: 8
+  state_components:
+    - eef_position_x
+    - eef_position_y
+    - eef_position_z
+    - eef_axis_angle_x
+    - eef_axis_angle_y
+    - eef_axis_angle_z
+    - finger_position_1
+    - mirrored_finger_position_2
+
+  state_mapping:
+    observation.state:
+      start: 0
+      stop: 8
+
+  camera_mapping:
+    wrist: observation.images.image2
+    table: observation.images.image
+
+action:
+  dim: 7
+  motion_type: cartesian_delta
+  gripper_type: binary_command
+  components:
+    - delta_x
+    - delta_y
+    - delta_z
+    - delta_axis_angle_x
+    - delta_axis_angle_y
+    - delta_axis_angle_z
+    - gripper_command
+  max_chunk_horizon: 50
+  execute_horizon: 50
+
+processing:
+  observation_normalization: server
+  action_denormalization: server
+  action_delivery: chunk

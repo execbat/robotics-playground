@@ -10,6 +10,7 @@ from robotics_playground.bridges.protocol import Action
 if TYPE_CHECKING:
     from robotics_playground.bridges.protocol import Observation
     from robotics_playground.config import EmbodimentConfig
+    from robotics_playground.presets import PolicyPreset
 
 
 _JOINT_LIMIT_MARGIN = 0.05
@@ -22,9 +23,22 @@ class EmbodimentAdapter:
         camera_mapping_override: dict[str, str] | None = None,
         session_id: str = "default",
         action_type: str = "absolute",
+        preset: PolicyPreset | None = None,
     ):
         self._config = config
-        if camera_mapping_override is not None:
+        self._preset = preset
+
+        if preset is not None:
+            preset_mapping = preset.observation.camera_mapping
+
+            if (
+                camera_mapping_override is not None
+                and camera_mapping_override != preset_mapping
+            ):
+                raise ValueError("Model camera mapping conflicts with preset")
+
+            self._camera_mapping = dict(preset_mapping)
+        elif camera_mapping_override is not None:
             self._camera_mapping = camera_mapping_override
         else:
             self._camera_mapping = config.camera_mapping
@@ -53,6 +67,8 @@ class EmbodimentAdapter:
         return list(self._camera_mapping.keys())
 
     def observation_to_openpi(self, obs: Observation, instruction: str) -> dict:
+        if self._preset is not None:
+            return self._observation_from_preset(obs, instruction)
         result: dict = {}
 
         for ros_name, openpi_key in self._camera_mapping.items():
@@ -157,5 +173,44 @@ class EmbodimentAdapter:
                     gripper_position=gripper_physical,
                 )
             )
+
+        return result
+
+    def _observation_from_preset(
+        self,
+        obs: Observation,
+        instruction: str,
+    ) -> dict:
+        preset = self._preset
+        if preset is None:
+            raise RuntimeError("Observation preset is not configured")
+
+        if "state" not in obs:
+            raise ValueError("Preset requires observation.state")
+
+        state = np.array(obs["state"], dtype=np.float32, copy=True)
+        expected_shape = (preset.observation.state_dim,)
+
+        if state.shape != expected_shape:
+            raise ValueError(
+                f"State shape {state.shape}; expected {expected_shape}"
+            )
+
+        if not np.isfinite(state).all():
+            raise ValueError("State contains non-finite values")
+
+        result: dict = {}
+
+        for camera_name, model_key in self._camera_mapping.items():
+            if camera_name not in obs["cameras"]:
+                raise ValueError(f"Missing required camera: {camera_name}")
+
+            result[model_key] = obs["cameras"][camera_name]
+
+        for model_key, bounds in preset.observation.state_mapping.items():
+            result[model_key] = state[bounds.start:bounds.stop].copy()
+
+        result["prompt"] = instruction
+        result["session_id"] = self._session_id
 
         return result

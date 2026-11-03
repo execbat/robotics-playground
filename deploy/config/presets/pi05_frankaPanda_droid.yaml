@@ -1,0 +1,64 @@
+id: pi05_frankaPanda_droid
+
+checkpoint: gs://openpi-assets/checkpoints/pi05_droid
+
+environment:
+  id: droid_pi05
+  module: ros2_manager_based_env.droid_pi05.run_ros2_rollout
+  physics_hz: 150
+  control_hz: 15
+  physics_decimation: 10
+
+ros2:
+  cameras:
+    wrist: /droid/obs/wrist_image_left
+    exterior_1: /droid/obs/exterior_image_1_left
+  state_topic: /droid/obs/state
+  state_msg_type: Float32MultiArray
+  action_topic: /droid/action_chunk
+  status_topic: /droid/status
+
+observation:
+  state_dim: 8
+  state_components:
+    - joint_position_1
+    - joint_position_2
+    - joint_position_3
+    - joint_position_4
+    - joint_position_5
+    - joint_position_6
+    - joint_position_7
+    - gripper_closure
+
+  state_mapping:
+    observation/joint_position:
+      start: 0
+      stop: 7
+    observation/gripper_position:
+      start: 7
+      stop: 8
+
+  camera_mapping:
+    wrist: observation/wrist_image_left
+    exterior_1: observation/exterior_image_1_left
+
+action:
+  dim: 8
+  motion_type: joint_velocity
+  gripper_type: closure
+  components:
+    - joint_velocity_command_1
+    - joint_velocity_command_2
+    - joint_velocity_command_3
+    - joint_velocity_command_4
+    - joint_velocity_command_5
+    - joint_velocity_command_6
+    - joint_velocity_command_7
+    - gripper_closure
+  max_chunk_horizon: 15
+  execute_horizon: 15
+
+processing:
+  observation_normalization: server
+  action_denormalization: server
+  action_delivery: chunk

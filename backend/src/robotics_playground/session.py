@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from robotics_playground.config import PolicyConfig
     from robotics_playground.policy.protocol import PolicyClient
     from robotics_playground.rerun_logger import RerunLogger
-
+    from robotics_playground.presets import PolicyPreset
 
 ACTION_INTERVAL = 0.5
 
@@ -48,11 +48,13 @@ class Session:
         policy_config: PolicyConfig,
         rerun_logger: RerunLogger,
         observation_timeout: float = 10.0,
+        preset: PolicyPreset | None = None,
     ):
         self._bridge = bridge
         self._policy_config = policy_config
         self._logger = rerun_logger
         self._observation_timeout = observation_timeout
+        self._preset = preset
 
         self._model_id: str = ""
         self._policy: PolicyClient | None = None
@@ -156,6 +158,7 @@ class Session:
             self._policy_config.embodiment,
             camera_mapping_override=model_config.camera_mapping,
             action_type=model_config.action_type,
+            preset=self._preset,
         )
         self._action_horizon = model_config.action_horizon
 

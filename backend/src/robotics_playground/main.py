@@ -133,6 +133,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
             bridge=bridge,
             policy_config=config.policy,
             rerun_logger=rerun_logger,
+            preset=config.preset,
         )
         await session.start_loop()
 

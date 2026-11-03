@@ -5,6 +5,7 @@ from pathlib import Path
 
 import yaml
 from pydantic import BaseModel, Field, model_validator
+from robotics_playground.presets import PolicyPreset, load_preset
 
 
 class ServerConfig(BaseModel):
@@ -79,13 +80,64 @@ class PlaygroundConfig(BaseModel):
     bridge: BridgeConfig = BridgeConfig()
     ros2: ROS2Config = ROS2Config()
     policy: PolicyConfig = PolicyConfig()
+    preset: PolicyPreset | None = None
 
 
 def load_config(path: str | None = None) -> PlaygroundConfig:
     if path is None:
         path = os.environ.get("PLAYGROUND_CONFIG")
-    if path and Path(path).is_file():
-        with open(path) as f:
-            data = yaml.safe_load(f) or {}
-        return PlaygroundConfig(**data)
-    return PlaygroundConfig()
+
+    if not path:
+        return PlaygroundConfig()
+
+    config_path = Path(path)
+
+    with config_path.open(encoding="utf-8") as stream:
+        data = yaml.safe_load(stream) or {}
+
+    if not isinstance(data, dict):
+        raise ValueError("Playground config must contain a YAML mapping")
+
+    preset_path = data.pop("preset", None)
+
+    if preset_path is not None:
+        if not isinstance(preset_path, str):
+            raise ValueError("preset must be a path to a preset YAML file")
+
+        preset_file = Path(preset_path)
+        if not preset_file.is_absolute():
+            preset_file = config_path.parent / preset_file
+
+        preset = load_preset(preset_file)
+
+        bridge = dict(data.get("bridge") or {})
+        if bridge.get("type", "ros2") != "ros2":
+            raise ValueError("A policy preset requires bridge.type: ros2")
+        bridge["type"] = "ros2"
+        data["bridge"] = bridge
+
+        preset_ros2 = {
+            "cameras": dict(preset.ros2.cameras),
+            "joint_state_topic": preset.ros2.state_topic,
+            "joint_command_topic": preset.ros2.action_topic,
+            "state_msg_type": preset.ros2.state_msg_type,
+            "physics_decimation": preset.environment.physics_decimation,
+            "status_topic": preset.ros2.status_topic,
+            "state_dim": preset.observation.state_dim,
+            "action_dim": preset.action.dim,
+            "max_chunk_horizon": preset.action.max_chunk_horizon,
+        }
+
+        ros2 = dict(data.get("ros2") or {})
+
+        for key, value in preset_ros2.items():
+            if key in ros2 and ros2[key] != value:
+                raise ValueError(
+                    f"ros2.{key} conflicts with preset '{preset.id}'"
+                )
+
+        ros2.update(preset_ros2)
+        data["ros2"] = ros2
+        data["preset"] = preset
+
+    return PlaygroundConfig(**data)
