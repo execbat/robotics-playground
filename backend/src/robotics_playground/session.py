@@ -11,6 +11,7 @@ import numpy as np
 
 from robotics_playground.policy import create_policy
 from robotics_playground.policy.embodiment_adapter import EmbodimentAdapter
+from robotics_playground.bridges.protocol import ChunkExecutionInterrupted
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +72,7 @@ class Session:
 
         self._loop_task: asyncio.Task | None = None
         self._conditions_changed = asyncio.Event()
+        self._inference_generation = 0
 
     @property
     def policy_status(self) -> str:
@@ -90,6 +92,8 @@ class Session:
 
     @sim_state.setter
     def sim_state(self, value: str) -> None:
+        if value != self._sim_state:
+            self._inference_generation += 1
         self._sim_state = value
         self._conditions_changed.set()
 
@@ -110,10 +114,12 @@ class Session:
         )
 
     def set_instruction(self, text: str) -> None:
+        self._inference_generation += 1
         self._instruction = text
         self._conditions_changed.set()
 
     def clear_instruction(self) -> None:
+        self._inference_generation += 1
         self._instruction = ""
         self._step = 0
         self._conditions_changed.set()
@@ -121,6 +127,7 @@ class Session:
     async def select_model(self, model_id: str) -> None:
         if model_id == self._model_id:
             return
+        self._inference_generation += 1
         await self._disconnect_policy()
         if not model_id:
             self._model_id = ""
@@ -216,6 +223,19 @@ class Session:
 
                 assert self._adapter is not None
                 assert self._policy is not None
+                if self._preset is not None:
+                    status = self._bridge.execution_status
+
+                    # Wait for status or for a previously paused chunk
+                    # to finish after the environment resumes.
+                    if (
+                        status is None
+                        or status.paused
+                        or not status.idle
+                        or status.remaining != 0
+                    ):
+                        await asyncio.sleep(0.05)
+                        continue
 
                 try:
                     obs = await asyncio.wait_for(
@@ -238,11 +258,18 @@ class Session:
                     self._instruction, obs_step, wallclock_time=inference_request_time
                 )
 
+                generation = self._inference_generation
+                policy = self._policy
+                adapter = self._adapter
+                instruction = self._instruction
+
                 try:
-                    raw_action = await self._policy.infer(
-                        self._adapter.observation_to_openpi(obs, self._instruction)
+                    raw_action = await policy.infer(
+                        adapter.observation_to_openpi(obs, instruction)
                     )
                 except Exception as exc:
+                    if generation != self._inference_generation:
+                        continue
                     logger.exception("Inference failed at cycle %d", cycle)
                     self._policy_error = _classify_connection_error(exc)
                     self._policy_status = "error"
@@ -252,16 +279,36 @@ class Session:
                         self._start_policy_connect()
                     continue
 
+                if (
+                    generation != self._inference_generation
+                    or policy is not self._policy
+                    or adapter is not self._adapter
+                    or not self.inferring
+                ):
+                    logger.info("Discarding outdated inference response")
+                    continue
                 inference_response_time = time.monotonic()
                 inference_ms = (inference_response_time - inference_request_time) * 1000
                 logger.info("Inference cycle %d: %.1fms", cycle, inference_ms)
 
-                if isinstance(raw_action, np.ndarray):
-                    actions_tensor = raw_action
-                elif isinstance(raw_action, dict):
-                    actions_tensor = raw_action.get("actions", next(iter(raw_action.values())))
-                else:
-                    actions_tensor = raw_action
+                if isinstance(raw_action, dict) and "actions" not in raw_action:
+                    logger.error(
+                        "Policy response has no 'actions' field; pausing simulation"
+                    )
+                    self.sim_state = "paused"
+
+                    try:
+                        await self._bridge.sim_control("pause")
+                    except Exception:
+                        logger.exception("Failed to pause environment")
+
+                    continue
+
+                actions_tensor = (
+                    raw_action["actions"]
+                    if isinstance(raw_action, dict)
+                    else raw_action
+                )
 
                 self._logger.log_raw_action_tensor(
                     actions_tensor, obs_step, wallclock_time=inference_response_time
@@ -269,6 +316,34 @@ class Session:
                 self._logger.log_inference_latency(
                     inference_ms, obs_step, wallclock_time=inference_response_time
                 )
+
+                if self._preset is not None:
+                    try:
+                        chunk = adapter.action_chunk_for_environment(
+                            actions_tensor
+                        )
+
+                        await self._bridge.execute_action_chunk(
+                            chunk,
+                            timeout=30.0,
+                        )
+
+                    except ChunkExecutionInterrupted as exc:
+                        logger.info("Chunk execution interrupted: %s", exc)
+                        self.sim_state = "paused"
+
+                    except Exception:
+                        logger.exception(
+                            "Chunk execution failed; pausing simulation"
+                        )
+                        self.sim_state = "paused"
+
+                        try:
+                            await self._bridge.sim_control("pause")
+                        except Exception:
+                            logger.exception("Failed to pause environment")
+
+                    continue
 
                 action_chunk = self._adapter.action_chunk_from_openpi(
                     actions_tensor, current_obs=obs

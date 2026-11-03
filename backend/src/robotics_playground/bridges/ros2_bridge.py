@@ -218,6 +218,7 @@ class ROS2Bridge:
         if self._get_simulation_state_client is None or self._loop is None:
             return
 
+        from simulation_interfaces.msg import Result
         from simulation_interfaces.srv import GetSimulationState
 
         try:
@@ -225,6 +226,13 @@ class ROS2Bridge:
             def on_response(f):
                 try:
                     response = f.result()
+                    if response.result.result != Result.RESULT_OK:
+                        logger.warning(
+                            "GetSimulationState failed: %s",
+                            response.result.error_message,
+                        )
+                        return
+
                     old_state = self._sim_state
                     self._sim_state = response.state.state
                     if old_state is not None and old_state != response.state.state:
@@ -641,6 +649,7 @@ class ROS2Bridge:
         if self._node is None:
             return
 
+        from simulation_interfaces.msg import Result
         from simulation_interfaces.srv import (
             ResetSimulation,
             SetSimulationState,
@@ -661,7 +670,7 @@ class ROS2Bridge:
                     response = await self._call_service_async(
                         self._set_simulation_state_client, make_request, timeout=5.0
                     )
-                    if response.result.result != 0:
+                    if response.result.result != Result.RESULT_OK:
                         err = response.result.error_message
                         logger.warning("SetSimulationState(%s) failed: %s", action, err)
                         raise RuntimeError(f"SetSimulationState({action}) failed: {err}")
@@ -690,7 +699,7 @@ class ROS2Bridge:
                     response = await self._call_service_async(
                         self._step_simulation_client, make_request, timeout=5.0
                     )
-                    if response.result.result != 0:
+                    if response.result.result != Result.RESULT_OK:
                         err = response.result.error_message
                         logger.warning("StepSimulation failed: %s", err)
                         raise RuntimeError(f"StepSimulation failed: {err}")
@@ -712,7 +721,7 @@ class ROS2Bridge:
                     response = await self._call_service_async(
                         self._reset_simulation_client, make_request, timeout=5.0
                     )
-                    if response.result.result != 0:
+                    if response.result.result != Result.RESULT_OK:
                         err = response.result.error_message
                         logger.warning("ResetSimulation failed: %s", err)
                         raise RuntimeError(f"ResetSimulation failed: {err}")
