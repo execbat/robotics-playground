@@ -73,6 +73,7 @@ class Session:
         self._loop_task: asyncio.Task | None = None
         self._conditions_changed = asyncio.Event()
         self._inference_generation = 0
+        self._control_lock = asyncio.Lock()
 
     @property
     def policy_status(self) -> str:
@@ -125,18 +126,56 @@ class Session:
         self._conditions_changed.set()
 
     async def select_model(self, model_id: str) -> None:
-        if model_id == self._model_id:
-            return
-        self._inference_generation += 1
-        await self._disconnect_policy()
-        if not model_id:
-            self._model_id = ""
-            return
-        if model_id not in self._policy_config.models:
-            logger.warning("Unknown model: %s", model_id)
-            return
-        self._model_id = model_id
-        self._start_policy_connect()
+        async with self._control_lock:
+            if model_id:
+                model_config = self._policy_config.models.get(model_id)
+
+                if model_config is None:
+                    logger.warning("Unknown model: %s", model_id)
+                    return
+
+                if not model_config.supports_preset(self._preset):
+                    active_id = (
+                        self._preset.id if self._preset is not None else None
+                    )
+                    logger.warning(
+                        "Model %s requires preset %s; active preset is %s",
+                        model_id,
+                        model_config.preset_id,
+                        active_id,
+                    )
+                    return
+
+            if model_id == self._model_id:
+                return
+
+            self._inference_generation += 1
+            await self.stop_loop()
+
+            try:
+                if self._preset is not None:
+                    self.sim_state = "paused"
+                    self.clear_instruction()
+
+                    await self._bridge.sim_control("pause")
+
+                    # Empty chunk clears pending actions without resetting
+                    # the scene. Both environment bridges support this.
+                    await self._bridge.send_action_chunk(
+                        np.empty(
+                            (0, self._preset.action.dim),
+                            dtype=np.float32,
+                        )
+                    )
+
+                await self._disconnect_policy()
+                self._model_id = model_id
+
+                if model_id:
+                    self._start_policy_connect()
+
+            finally:
+                await self.start_loop()
 
     async def _disconnect_policy(self) -> None:
         if self._connect_task is not None:
@@ -364,3 +403,41 @@ class Session:
             raise
         except Exception:
             logger.exception("Inference loop crashed")
+
+    async def sim_control(
+        self,
+        action: str,
+        speed: float | None = None,
+    ) -> None:
+        target_states = {
+            "play": "running",
+            "pause": "paused",
+            "stop": "idle",
+            "reset": "idle",
+            "step": "paused",
+        }
+
+        if action not in target_states:
+            raise ValueError(f"Unsupported simulation command: {action}")
+
+        async with self._control_lock:
+            self._inference_generation += 1
+            self.sim_state = "paused"
+
+            # Cancel inference or waiting for chunk completion before
+            # sending the control command to the environment.
+            await self.stop_loop()
+
+            try:
+                if action in ("reset", "stop"):
+                    self.clear_instruction()
+
+                await self._bridge.sim_control(action, speed=speed)
+                self.sim_state = target_states[action]
+
+            except Exception:
+                self.sim_state = "paused"
+                raise
+
+            finally:
+                await self.start_loop()

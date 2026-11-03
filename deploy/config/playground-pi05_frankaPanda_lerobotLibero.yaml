@@ -1,0 +1,19 @@
+preset: presets/pi05_frankaPanda_lerobotLibero.yaml
+
+server:
+  host: "0.0.0.0"
+  port: 8000
+  log_level: "info"
+
+rerun:
+  grpc_port: 9876
+
+bridge:
+  type: ros2
+
+ros2:
+  domain_id: 0
+
+policy:
+  type: openpi
+  models: {}

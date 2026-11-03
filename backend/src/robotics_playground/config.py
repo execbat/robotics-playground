@@ -56,6 +56,11 @@ class ModelConfig(BaseModel):
     action_horizon: int = Field(default=4, gt=0)
     action_type: str = "absolute"
     camera_mapping: dict[str, str] | None = None
+    preset_id: str | None = None
+
+    def supports_preset(self, preset: PolicyPreset | None) -> bool:
+        active_id = preset.id if preset is not None else None
+        return self.preset_id == active_id
 
 
 class PolicyConfig(BaseModel):

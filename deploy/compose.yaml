@@ -3,23 +3,27 @@ services:
     image: robotics-playground-ui:${TAG:-local}
     ports:
       - "8080:8080"
+    extra_hosts:
+      - "backend:host-gateway"
     depends_on:
       backend:
         condition: service_started
 
   backend:
     image: robotics-playground:${TAG:-local}
-    ports:
-      - "8000:8000"
-      - "9876:9876"
-      - "9090:9090"
+    network_mode: host
+    ipc: host
     volumes:
-      - ./config/playground.yaml:/etc/robotics-playground/config.yaml:ro
+      - ./config:/etc/robotics-playground:ro
     environment:
-      PLAYGROUND_CONFIG: /etc/robotics-playground/config.yaml
+#      PLAYGROUND_CONFIG: /etc/robotics-playground/playground-pi05_frankaPanda_droid.yaml
+      PLAYGROUND_CONFIG: /etc/robotics-playground/playground-pi05_frankaPanda_lerobotLibero.yaml
+      ROS_DOMAIN_ID: "0"
+      RMW_IMPLEMENTATION: rmw_fastrtps_cpp
       RERUN_VIEWER_URL: "http://localhost:8080/rerun"
       RERUN_GRPC_URL: "http://localhost:9876"
       RERUN_ASSETS_URL: "http://localhost:8080/rerun/"
+      FASTDDS_BUILTIN_TRANSPORTS: UDPv4
 
   isaac-lab:
     image: nvcr.io/nvidia/isaac-lab:2.3.2
@@ -54,10 +58,16 @@ services:
 
         ./isaaclab.sh -p -m pip install -e /workspace/ros2_manager_based_env
 
-        exec ./isaaclab.sh -p -m ros2_manager_based_env.droid_pi05.run_ros2_rollout \
+        exec ./isaaclab.sh -p -m ros2_manager_based_env.custom_env_3_3.run_ros2_rollout \
           --headless \
           --enable_cameras \
           --rendering_mode performance
+          
+#        exec ./isaaclab.sh -p -m ros2_manager_based_env.droid_pi05.run_ros2_rollout \
+#          --headless \
+#          --enable_cameras \
+#          --rendering_mode performance          
+
 
     deploy:
       resources:

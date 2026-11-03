@@ -189,12 +189,26 @@ def get_config():
 def list_models(type: str = Query(default="robotics")):
     if config.policy.models:
         models = [
-            {"id": model_id, "name": mc.name or model_id, "type": "robotics"}
-            for model_id, mc in config.policy.models.items()
+            {
+                "id": model_id,
+                "name": model_config.name or model_id,
+                "type": "robotics",
+            }
+            for model_id, model_config in config.policy.models.items()
+            if model_config.supports_preset(config.preset)
+        ]
+    elif config.preset is None and config.policy.type == "mock":
+        models = [
+            {"id": "mock-v1", "name": "Mock", "type": "robotics"}
         ]
     else:
-        models = [{"id": "mock-v1", "name": "Mock", "type": "robotics"}]
-    return {"models": [m for m in models if m["type"] == type]}
+        models = []
+
+    return {
+        "models": [
+            model for model in models if model["type"] == type
+        ]
+    }
 
 
 @app.websocket("/ws/sessions/{session_id}")
@@ -213,7 +227,7 @@ async def websocket_session(websocket: WebSocket, session_id: str):
                         {
                             "type": "status",
                             "sim_status": bridge.bridge_status,
-                            "sim_state": sim_state.state,
+                            "sim_state": session.sim_state,
                             "policy_status": session.policy_status,
                             "policy_error": session.policy_error,
                             "model_id": session.model_id,
@@ -255,21 +269,24 @@ async def websocket_session(websocket: WebSocket, session_id: str):
             elif msg_type == "sim_control":
                 action = msg.get("action", "")
                 speed = msg.get("speed")
+
                 try:
-                    await bridge.sim_control(action, speed=speed)
+                    await session.sim_control(action, speed=speed)
                 except Exception:
                     logger.exception("sim_control failed: %s", action)
                 else:
-                    sim_state.on_command(action)
-                    session.sim_state = sim_state.state
+                    sim_state.state = session.sim_state
+
                     if action == "reset":
-                        obs_streamer = app.state.obs_streamer
-                        obs_streamer.reset()
-                        session.clear_instruction()
+                        app.state.obs_streamer.reset()
 
             elif msg_type == "select_model":
                 model_id = msg.get("model_id", "")
-                await session.select_model(model_id)
+
+                try:
+                    await session.select_model(model_id)
+                except Exception:
+                    logger.exception("Model selection failed: %s", model_id)
 
     except WebSocketDisconnect:
         pass

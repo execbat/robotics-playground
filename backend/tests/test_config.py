@@ -38,12 +38,13 @@ def test_load_config_from_yaml(tmp_path):
     assert config.ros2.cameras == {"wrist": "/cam/wrist"}
 
 
-def test_load_config_missing_file_returns_defaults():
+def test_load_config_missing_file_raises():
+    import pytest
+
     from robotics_playground.config import load_config
 
-    config = load_config("/nonexistent/path.yaml")
-    assert config.server.port == 8000
-    assert config.bridge.type == "mock"
+    with pytest.raises(FileNotFoundError):
+        load_config("/nonexistent/path.yaml")
 
 
 def test_env_var_sets_config_path(tmp_path, monkeypatch):

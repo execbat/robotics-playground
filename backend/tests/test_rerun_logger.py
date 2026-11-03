@@ -109,31 +109,49 @@ def test_clear_logs_clear_markers(mock_rr):
 
     logger = RerunLogger(port=9876)
     logger.start()
-    logger.flush()
-    mock_rr.reset_mock()
 
-    logger._last_step = 10
-    logger.clear()
-    logger.flush()
+    try:
+        logger.flush()
+        mock_rr.reset_mock()
 
-    # Clear resets to step 0 and time 0 for a fresh start
-    mock_rr.set_time.assert_any_call("step", sequence=0)
-    mock_rr.set_time.assert_any_call("time", duration=0.0)
-    logged_paths = [call.args[0] for call in mock_rr.log.call_args_list]
-    assert "session/policy_0" in logged_paths
-    assert "session/instructions" in logged_paths
-    logger.shutdown()
+        logger._last_step = 10
+        logger.clear()
+        logger.flush()
+
+        # Clear is placed after the previous data.
+        mock_rr.set_time.assert_any_call("step", sequence=11)
+        mock_rr.Clear.assert_any_call(recursive=True)
+
+        mock_rr.log.assert_any_call(
+            "session/policy_0",
+            mock_rr.Clear.return_value,
+        )
+        mock_rr.log.assert_any_call(
+            "session/instructions",
+            mock_rr.Clear.return_value,
+        )
+
+        # New data must start after the clear marker.
+        assert logger._step_offset == 12
+        assert logger._last_step == 0
+        assert logger._start_time is None
+    finally:
+        logger.shutdown()
 
 
-def test_clear_resets_step_offset(mock_rr):
+def test_clear_advances_step_offset():
     from robotics_playground.rerun_logger import RerunLogger
 
     logger = RerunLogger()
     logger._initialized = True
-    logger._step_offset = 100  # Simulate accumulated offset
+    logger._step_offset = 100
     logger._last_step = 10
+
     logger.clear()
-    assert logger._step_offset == 0  # Reset to 0 for fresh start
+
+    # Previous effective step: 110.
+    # Clear marker: 111. Next episode starts at 112.
+    assert logger._step_offset == 112
     assert logger._last_step == 0
 
 
@@ -147,32 +165,48 @@ def test_clear_resets_start_time(mock_rr):
     assert logger._start_time is None
 
 
-def test_log_after_clear_starts_at_zero(mock_rr):
+def test_log_after_clear_starts_after_previous_episode(mock_rr):
     from robotics_playground.rerun_logger import RerunLogger
 
     logger = RerunLogger()
     logger.start()
-    logger.flush()
 
-    logger._step_offset = 100  # Simulate accumulated offset
-    logger._last_step = 5
-    logger.clear()
-    logger.flush()
-    mock_rr.reset_mock()
+    try:
+        logger.flush()
 
-    obs = {
-        "step": 0,
-        "cameras": {"wrist": np.zeros((240, 320, 3), dtype=np.uint8)},
-        "joint_positions": [0.1],
-        "joint_velocities": [0.0],
-    }
-    # After clear, step_offset is 0 and first observation sets new time baseline
-    logger.log_observation(obs, step=0, wallclock_time=25.0)
-    logger.flush()
+        logger._step_offset = 100
+        logger._last_step = 5
+        logger.clear()
+        logger.flush()
 
-    mock_rr.set_time.assert_any_call("step", sequence=0)  # Starts at 0, not offset
-    mock_rr.set_time.assert_any_call("time", duration=0.0)  # First log after clear resets to 0
-    logger.shutdown()
+        # Previous data ends at 105; clear is recorded at 106.
+        mock_rr.set_time.assert_any_call("step", sequence=106)
+        assert logger._step_offset == 107
+
+        mock_rr.reset_mock()
+
+        obs = {
+            "step": 0,
+            "cameras": {
+                "wrist": np.zeros((240, 320, 3), dtype=np.uint8),
+            },
+            "joint_positions": [0.1],
+            "joint_velocities": [0.0],
+        }
+
+        logger.log_observation(obs, step=0, wallclock_time=25.0)
+        logger.flush()
+
+        # Environment step 0 maps to recording step 107.
+        mock_rr.set_time.assert_any_call("step", sequence=107)
+
+        # Elapsed time starts from the new episode's baseline.
+        mock_rr.set_time.assert_any_call("time", duration=0.0)
+
+        assert logger._last_step == 0
+        assert logger._start_time == 25.0
+    finally:
+        logger.shutdown()
 
 
 def test_clear_before_start_is_noop(mock_rr):
